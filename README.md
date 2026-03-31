@@ -22,6 +22,32 @@ RepoDock is still under active development. Features, UI details, and provider b
 | Layout Editor | Settings |
 | ![RepoDock layout editor](public/images/demo3.png) | ![RepoDock settings](public/images/demo4.png) |
 
+## Install
+
+Homebrew:
+
+```bash
+brew install RoversX/tap/repodock
+```
+
+Or tap first:
+
+```bash
+brew tap RoversX/tap
+brew install repodock
+```
+
+Manual download:
+
+- macOS: download `repodock-macos.zip` from GitHub Releases
+- Linux: download `repodock-linux-amd64.tar.gz` or `repodock-linux-arm64.tar.gz` from GitHub Releases
+
+Check the installed version:
+
+```bash
+repodock --version
+```
+
 ## Local development
 
 ```bash
