@@ -244,6 +244,7 @@ type model struct {
 	layoutDetailOpen      bool
 	layoutProject         domain.Project
 	layouts               []store.Layout
+	layoutDefault         string
 	layoutSelected        int
 	layoutName            string
 	layoutPanes           []store.Pane
@@ -338,6 +339,12 @@ type layoutAppliedMsg struct {
 }
 
 type layoutDeletedMsg struct {
+	project string
+	name    string
+	err     error
+}
+
+type layoutDefaultSetMsg struct {
 	project string
 	name    string
 	err     error
@@ -526,6 +533,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("Deleted layout %s for %s.", msg.name, msg.project)
 		}
 		return m, nil
+	case layoutDefaultSetMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Set default layout failed: %v", msg.err)
+		} else {
+			m.reloadLayouts(msg.name)
+			m.status = fmt.Sprintf("Default layout set to %s for %s.", msg.name, msg.project)
+		}
+		return m, nil
 	case shellExitedMsg:
 		if msg.err != nil {
 			m.status = fmt.Sprintf("Shell closed with error for %s: %v", msg.project, msg.err)
@@ -701,10 +716,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.layoutOpen && m.layoutDetailOpen && !m.layoutEditing {
-				if m.layoutCursor > 0 {
-					m.layoutCursor--
-					m.layoutField = 0
-				}
+				m.layoutMoveSelection("up")
 				return m, nil
 			}
 			if m.viewFocus {
@@ -781,10 +793,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.layoutOpen && m.layoutDetailOpen && !m.layoutEditing {
-				if m.layoutCursor < len(m.layoutPanes)-1 {
-					m.layoutCursor++
-					m.layoutField = 0
-				}
+				m.layoutMoveSelection("down")
 				return m, nil
 			}
 			if m.viewFocus {
@@ -821,7 +830,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.layoutOpen && m.layoutDetailOpen && !m.layoutEditing {
-				m.layoutSelectParent()
+				m.layoutMoveSelection("left")
 				return m, nil
 			}
 			if m.viewFocus {
@@ -844,7 +853,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.layoutOpen && m.layoutDetailOpen && !m.layoutEditing {
-				m.layoutSelectFirstChild()
+				m.layoutMoveSelection("right")
 				return m, nil
 			}
 			if m.viewFocus {
@@ -1003,6 +1012,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "n":
 				m.beginNewLayout()
 				return m, nil
+			case "f":
+				if m.layoutName == "" {
+					m.status = "Create a layout first."
+					return m, nil
+				}
+				return m, setDefaultLayoutCmd(m.layoutProject, m.layoutName)
 			case "x":
 				if m.layoutDetailOpen || m.layoutNaming || m.layoutName == "" {
 					return m, nil
@@ -1265,6 +1280,23 @@ func (m *model) runCommand(raw string) tea.Cmd {
 		}
 		m.status = fmt.Sprintf("Opening shell in %s...", project.Name)
 		return m.openProjectShell(project)
+	case "default-layout":
+		project, ok := m.selectedProject()
+		if !ok {
+			m.status = "No project selected."
+			return nil
+		}
+		layout, err := store.NewLayoutStore(project.Path).Load()
+		if err != nil {
+			m.status = fmt.Sprintf("Failed to load default layout: %v", err)
+			return nil
+		}
+		if len(layout.Panes) == 0 {
+			m.status = fmt.Sprintf("No saved default layout for %s.", project.Name)
+			return nil
+		}
+		m.status = fmt.Sprintf("Loading default layout for %s...", project.Name)
+		return applyLayoutCmd(project, layout.Panes)
 	case "pin":
 		return m.setPinnedForSelected(true)
 	case "unpin":
@@ -3321,6 +3353,13 @@ func min(a, b int) int {
 	return b
 }
 
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 func loadProjectsCmd(stateStore store.AppStateStore) tea.Cmd {
 	return func() tea.Msg {
 		state, err := stateStore.Load()
@@ -3800,13 +3839,20 @@ func (m model) projectActions() []actionEntry {
 		pinAction = "unpin"
 	}
 
-	return []actionEntry{
+	actions := []actionEntry{
 		{id: "shell", label: "Open Shell", desc: "Open an interactive shell in this project."},
-		{id: pinAction, label: pinLabel, desc: pinDesc},
-		{id: "hide", label: "Hide Project", desc: "Remove this project from RepoDock only."},
-		{id: "copy", label: "Copy Path", desc: "Copy the project path to the clipboard."},
-		{id: "sync", label: "Reload Providers", desc: "Refresh projects from detected providers."},
 	}
+	if store.NewLayoutStore(project.Path).HasLayout() {
+		actions = append(actions, actionEntry{id: "default-layout", label: "Load Default Layout", desc: "Open the project's default saved layout."})
+	}
+	actions = append(actions,
+		actionEntry{id: "layout", label: "Edit Layout", desc: "Create or edit launch layouts for this project."},
+		actionEntry{id: pinAction, label: pinLabel, desc: pinDesc},
+		actionEntry{id: "hide", label: "Hide Project", desc: "Remove this project from RepoDock only."},
+		actionEntry{id: "copy", label: "Copy Path", desc: "Copy the project path to the clipboard."},
+		actionEntry{id: "sync", label: "Reload Providers", desc: "Refresh projects from detected providers."},
+	)
+	return actions
 }
 
 func (m *model) runSelectedAction() tea.Cmd {
@@ -4594,6 +4640,7 @@ func (m *model) reloadLayouts(preferName string) {
 	collection, err := ls.LoadCollection()
 	if err != nil {
 		m.layouts = nil
+		m.layoutDefault = ""
 		m.layoutSelected = 0
 		m.layoutName = ""
 		m.layoutPanes = []store.Pane{{Command: ""}}
@@ -4605,6 +4652,7 @@ func (m *model) reloadLayouts(preferName string) {
 	}
 
 	m.layouts = append([]store.Layout(nil), collection.Layouts...)
+	m.layoutDefault = collection.Default
 	m.layoutCursor = 0
 	m.layoutField = 0
 	m.layoutEditing = false
@@ -4613,6 +4661,7 @@ func (m *model) reloadLayouts(preferName string) {
 
 	if len(m.layouts) == 0 {
 		m.layoutSelected = 0
+		m.layoutDefault = ""
 		m.layoutName = ""
 		m.layoutPanes = []store.Pane{{Command: ""}}
 		m.layoutDirty = false
@@ -4648,6 +4697,7 @@ func (m *model) moveLayoutSelection(delta int) {
 
 func (m *model) loadSelectedLayout() {
 	if len(m.layouts) == 0 {
+		m.layoutDefault = ""
 		m.layoutName = ""
 		m.layoutPanes = []store.Pane{{Command: ""}}
 		m.layoutHasSaved = false
@@ -4808,6 +4858,131 @@ func (m *model) layoutSelectFirstChild() {
 	}
 }
 
+func (m model) layoutCanvasWidth() int {
+	panelWidth := m.contentWidth()
+	if panelWidth >= 28 {
+		panelWidth -= 4
+	}
+	panelStyle := currentStyles.panel.BorderForeground(lipgloss.Color(activeTheme.Palette.BorderActive))
+	bodyWidth := max(1, panelWidth-panelStyle.GetHorizontalFrameSize())
+	if bodyWidth < 52 {
+		return max(24, bodyWidth)
+	}
+	return max(24, max(20, (bodyWidth*2)/3))
+}
+
+func layoutCanvasHeight(paneCount int) int {
+	return max(12, min(22, 10+paneCount*2))
+}
+
+func rectCenter(rect layoutRect) (int, int) {
+	return rect.x + rect.w/2, rect.y + rect.h/2
+}
+
+func axisOverlap(aStart, aLen, bStart, bLen int) int {
+	aEnd := aStart + aLen
+	bEnd := bStart + bLen
+	start := max(aStart, bStart)
+	end := min(aEnd, bEnd)
+	if end <= start {
+		return 0
+	}
+	return end - start
+}
+
+func (m *model) layoutMoveSelection(direction string) {
+	if len(m.layoutPanes) == 0 || m.layoutCursor < 0 || m.layoutCursor >= len(m.layoutPanes) {
+		return
+	}
+
+	rects := computeLayoutRects(m.layoutPanes, m.layoutCanvasWidth(), layoutCanvasHeight(len(m.layoutPanes)))
+	current := rects[m.layoutCursor]
+	curCX, curCY := rectCenter(current)
+
+	best := -1
+	bestScore := int(^uint(0) >> 1)
+
+	for i, candidate := range rects {
+		if i == m.layoutCursor {
+			continue
+		}
+
+		candCX, candCY := rectCenter(candidate)
+		overlap := 0
+		primary := 0
+		secondary := 0
+		valid := false
+
+		switch direction {
+		case "up":
+			if candidate.y >= current.y {
+				continue
+			}
+			valid = true
+			overlap = axisOverlap(current.x, current.w, candidate.x, candidate.w)
+			primary = current.y - (candidate.y + candidate.h)
+			if primary < 0 {
+				primary = 0
+			}
+			secondary = abs(curCX - candCX)
+		case "down":
+			if candidate.y+candidate.h <= current.y+current.h {
+				continue
+			}
+			valid = true
+			overlap = axisOverlap(current.x, current.w, candidate.x, candidate.w)
+			primary = candidate.y - (current.y + current.h)
+			if primary < 0 {
+				primary = 0
+			}
+			secondary = abs(curCX - candCX)
+		case "left":
+			if candidate.x >= current.x {
+				continue
+			}
+			valid = true
+			overlap = axisOverlap(current.y, current.h, candidate.y, candidate.h)
+			primary = current.x - (candidate.x + candidate.w)
+			if primary < 0 {
+				primary = 0
+			}
+			secondary = abs(curCY - candCY)
+		case "right":
+			if candidate.x+candidate.w <= current.x+current.w {
+				continue
+			}
+			valid = true
+			overlap = axisOverlap(current.y, current.h, candidate.y, candidate.h)
+			primary = candidate.x - (current.x + current.w)
+			if primary < 0 {
+				primary = 0
+			}
+			secondary = abs(curCY - candCY)
+		}
+
+		if !valid {
+			continue
+		}
+
+		score := primary*1000 + secondary
+		if overlap == 0 {
+			score += 100000
+		} else {
+			score -= min(overlap, 999)
+		}
+
+		if score < bestScore {
+			bestScore = score
+			best = i
+		}
+	}
+
+	if best >= 0 {
+		m.layoutCursor = best
+		m.layoutField = 0
+	}
+}
+
 func (m *model) layoutToggleDirection() {
 	if len(m.layoutPanes) == 0 || m.layoutCursor <= 0 || m.layoutCursor >= len(m.layoutPanes) {
 		return
@@ -4950,6 +5125,22 @@ func deleteLayoutCmd(project domain.Project, name string) tea.Cmd {
 	}
 }
 
+func setDefaultLayoutCmd(project domain.Project, name string) tea.Cmd {
+	return func() tea.Msg {
+		ls := store.NewLayoutStore(project.Path)
+		collection, err := ls.LoadCollection()
+		if err != nil {
+			return layoutDefaultSetMsg{project: project.Name, name: name, err: err}
+		}
+		if _, ok := collection.Find(name); !ok {
+			return layoutDefaultSetMsg{project: project.Name, name: name, err: fmt.Errorf("layout not found")}
+		}
+		collection.Default = name
+		err = ls.SaveCollection(collection)
+		return layoutDefaultSetMsg{project: project.Name, name: name, err: err}
+	}
+}
+
 func applyLayoutCmd(project domain.Project, panes []store.Pane) tea.Cmd {
 	return func() tea.Msg {
 		err := ghostty.OpenFromLayout(project.Path, panes)
@@ -4968,7 +5159,7 @@ func renderLayoutSummaryPanel(m model, width int) string {
 	subtle := currentStyles.subtle
 	lines := []string{
 		"  " + currentStyles.panelTitle.Render("Layout") + "  " + subtle.Render(m.layoutProject.Name),
-		"  " + subtle.Render(fmt.Sprintf("layouts: %d  ·  current: %s  ·  state: %s", len(m.layouts), layoutDisplayName(m.layoutName), layoutSourceLabel(m.layoutSource, m.layoutDirty))),
+		"  " + subtle.Render(fmt.Sprintf("layouts: %d  ·  current: %s  ·  default: %s  ·  state: %s", len(m.layouts), layoutDisplayName(m.layoutName), layoutDisplayName(m.layoutDefault), layoutSourceLabel(m.layoutSource, m.layoutDirty))),
 		"",
 	}
 
@@ -4993,7 +5184,7 @@ func renderLayoutSummaryPanel(m model, width int) string {
 				label = "default"
 			}
 			marker := ""
-			if i == 0 {
+			if strings.EqualFold(layout.Name, m.layoutDefault) {
 				marker = subtle.Render(" [default]")
 			}
 			lines = append(lines, prefix+nameStyle.Render(label)+marker+"  "+subtle.Render(fmt.Sprintf("%d panes", len(layout.Panes))))
@@ -5006,7 +5197,7 @@ func renderLayoutSummaryPanel(m model, width int) string {
 		lines = append(lines, "")
 	}
 	lines = append(lines, "  "+subtle.Render("Apply auto-submits each pane command with Enter."))
-	lines = append(lines, "  "+subtle.Render("[n] new  [x] delete  [enter] inspect/edit  [l] load selected  [g] grab current  [s] save current  [p] apply current"))
+	lines = append(lines, "  "+subtle.Render("[n] new  [f] set default  [x] delete  [enter] inspect/edit  [l] load selected  [g] grab current  [s] save current  [p] apply current"))
 
 	panelWidth := width
 	if width >= 28 {
