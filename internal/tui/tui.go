@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -167,6 +168,7 @@ var allCommands = []commandEntry{
 	{"settings", "open settings panel"},
 	{"sync", "sync projects from providers"},
 	{"shell", "open shell in selected project"},
+	{"reveal", "open selected project in Finder: /reveal [reveal|open]"},
 	{"pin", "pin selected project to top"},
 	{"unpin", "remove selected project from top pins"},
 	{"hide", "hide selected project from repodock"},
@@ -350,8 +352,14 @@ type layoutDefaultSetMsg struct {
 	err     error
 }
 
+type revealInFinderFinishedMsg struct {
+	path string
+	mode string
+	err  error
+}
+
 func (m model) settingsRowCount() int {
-	return 11
+	return 12
 }
 
 func Run() error {
@@ -539,6 +547,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.reloadLayouts(msg.name)
 			m.status = fmt.Sprintf("Default layout set to %s for %s.", msg.name, msg.project)
+		}
+		return m, nil
+	case revealInFinderFinishedMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Reveal in Finder failed: %v", msg.err)
+		} else {
+			switch msg.mode {
+			case "open":
+				m.status = fmt.Sprintf("Opened %s in Finder.", filepath.Base(msg.path))
+			default:
+				m.status = fmt.Sprintf("Revealed %s in Finder.", filepath.Base(msg.path))
+			}
 		}
 		return m, nil
 	case shellExitedMsg:
@@ -1212,13 +1232,26 @@ func (m *model) runCommand(raw string) tea.Cmd {
 			return m.setDemoMode(false)
 		}
 	}
+	if strings.HasPrefix(command, "reveal ") {
+		mode := strings.TrimSpace(strings.TrimPrefix(command, "reveal "))
+		project, ok := m.selectedProject()
+		if !ok {
+			m.status = "No project selected."
+			return nil
+		}
+		switch mode {
+		case "reveal", "open":
+			m.status = fmt.Sprintf("Opening %s in Finder (%s)...", project.Name, mode)
+			return revealInFinderCmd(project.Path, mode)
+		}
+	}
 
 	switch command {
 	case "":
 		m.status = "Command bar cleared."
 		return nil
 	case "help":
-		m.status = "Commands: /help /demo [/demo on|off] /onboard /providers /view mixed|provider /layout /theme [/theme family] /mode auto|dark|light /palette tableau10 /sync /shell /pin /unpin /hide /hidden /unhide-all /copy /clear"
+		m.status = "Commands: /help /demo [/demo on|off] /onboard /providers /view mixed|provider /layout /theme [/theme family] /mode auto|dark|light /palette tableau10 /sync /shell /reveal [/reveal reveal|open] /pin /unpin /hide /hidden /unhide-all /copy /clear"
 		return nil
 	case "demo":
 		return m.setDemoMode(!m.demoMode())
@@ -1280,6 +1313,15 @@ func (m *model) runCommand(raw string) tea.Cmd {
 		}
 		m.status = fmt.Sprintf("Opening shell in %s...", project.Name)
 		return m.openProjectShell(project)
+	case "reveal":
+		project, ok := m.selectedProject()
+		if !ok {
+			m.status = "No project selected."
+			return nil
+		}
+		mode := m.finderRevealMode()
+		m.status = fmt.Sprintf("Opening %s in Finder (%s)...", project.Name, mode)
+		return revealInFinderCmd(project.Path, mode)
 	case "default-layout":
 		project, ok := m.selectedProject()
 		if !ok {
@@ -1297,6 +1339,15 @@ func (m *model) runCommand(raw string) tea.Cmd {
 		}
 		m.status = fmt.Sprintf("Loading default layout for %s...", project.Name)
 		return applyLayoutCmd(project, layout.Panes)
+	case "finder":
+		project, ok := m.selectedProject()
+		if !ok {
+			m.status = "No project selected."
+			return nil
+		}
+		mode := m.finderRevealMode()
+		m.status = fmt.Sprintf("Opening %s in Finder (%s)...", project.Name, mode)
+		return revealInFinderCmd(project.Path, mode)
 	case "pin":
 		return m.setPinnedForSelected(true)
 	case "unpin":
@@ -2443,6 +2494,7 @@ func renderSettingsPanel(m model, width, maxLines int) string {
 	if m.settings.Ghostty.Indicator {
 		ghosttyIndicator = "on"
 	}
+	finderReveal := m.finderRevealMode()
 	type settingsBlock struct {
 		row  int
 		text string
@@ -2462,6 +2514,8 @@ func renderSettingsPanel(m model, width, maxLines int) string {
 		{row: 8, text: renderRow(8, "Open", []string{"off", "new-window"}, ghosttyOpen)},
 		{row: 9, text: renderRow(9, "Layout", []string{"off", "shell", "dev", "ai"}, ghosttyLayout)},
 		{row: 10, text: renderRow(10, "Indicator", []string{"off", "on"}, ghosttyIndicator)},
+		{row: -1, text: "  " + currentStyles.subtle.Render("Finder")},
+		{row: 11, text: renderRow(11, "Reveal", []string{"reveal", "open"}, finderReveal)},
 	}
 
 	header := []string{"  " + currentStyles.panelTitle.Render("Settings")}
@@ -3557,6 +3611,24 @@ func copyPathCmd(path string) tea.Cmd {
 	}
 }
 
+func revealInFinderCmd(path, mode string) tea.Cmd {
+	return func() tea.Msg {
+		if runtime.GOOS != "darwin" {
+			return revealInFinderFinishedMsg{path: path, mode: mode, err: fmt.Errorf("finder is only available on macOS")}
+		}
+		mode = strings.TrimSpace(strings.ToLower(mode))
+		var cmd *exec.Cmd
+		if mode == "open" {
+			cmd = exec.Command("open", path)
+		} else {
+			mode = "reveal"
+			cmd = exec.Command("open", "-R", path)
+		}
+		err := cmd.Run()
+		return revealInFinderFinishedMsg{path: path, mode: mode, err: err}
+	}
+}
+
 func saveStateCmd(stateStore store.AppStateStore, state store.AppState, action string) tea.Cmd {
 	return func() tea.Msg {
 		if err := stateStore.Save(state); err != nil {
@@ -3844,6 +3916,15 @@ func (m model) projectActions() []actionEntry {
 	}
 	if store.NewLayoutStore(project.Path).HasLayout() {
 		actions = append(actions, actionEntry{id: "default-layout", label: "Load Default Layout", desc: "Open the project's default saved layout."})
+	}
+	if runtime.GOOS == "darwin" {
+		label := "Reveal in Finder"
+		desc := "Show this project in Finder."
+		if m.finderRevealMode() == "open" {
+			label = "Open in Finder"
+			desc = "Open this project folder in Finder."
+		}
+		actions = append(actions, actionEntry{id: "finder", label: label, desc: desc})
 	}
 	actions = append(actions,
 		actionEntry{id: "layout", label: "Edit Layout", desc: "Create or edit launch layouts for this project."},
@@ -4295,6 +4376,14 @@ func (m *model) adjustSetting(delta int) {
 		m.settings.Ghostty.Layout = v
 	case 10: // ghostty indicator
 		m.settings.Ghostty.Indicator = !m.settings.Ghostty.Indicator
+	case 11: // finder reveal mode
+		opts := []string{"reveal", "open"}
+		idx := indexOfString(opts, m.finderRevealMode())
+		if idx < 0 {
+			idx = 0
+		}
+		idx = (idx + delta + len(opts)) % len(opts)
+		m.settings.Finder.Reveal = opts[idx]
 	}
 }
 
@@ -4509,6 +4598,15 @@ func (m model) gridWidthMode() string {
 		return strings.TrimSpace(strings.ToLower(m.settings.UI.GridWidth))
 	default:
 		return "normal"
+	}
+}
+
+func (m model) finderRevealMode() string {
+	switch strings.TrimSpace(strings.ToLower(m.settings.Finder.Reveal)) {
+	case "open":
+		return "open"
+	default:
+		return "reveal"
 	}
 }
 

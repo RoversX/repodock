@@ -14,6 +14,7 @@ type Settings struct {
 	Theme      ThemeSettings      `json:"theme"`
 	UI         UISettings         `json:"ui"`
 	Ghostty    GhosttySettings    `json:"ghostty"`
+	Finder     FinderSettings     `json:"finder"`
 	Onboarding OnboardingSettings `json:"onboarding"`
 }
 
@@ -27,6 +28,10 @@ type GhosttySettings struct {
 	Open      string `json:"open,omitempty"`      // "" / "new-window"
 	Layout    string `json:"layout,omitempty"`    // "" / "shell" / "dev" / "ai"
 	Indicator bool   `json:"indicator,omitempty"` // show open-in-ghostty marker
+}
+
+type FinderSettings struct {
+	Reveal string `json:"reveal,omitempty"` // "" / "reveal" / "open"
 }
 
 type ThemeSettings struct {
