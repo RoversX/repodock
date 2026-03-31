@@ -1,0 +1,75 @@
+name: release
+
+on:
+  push:
+    tags:
+      - '[0-9]*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re)release (e.g. 0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Determine tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout release tag
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: git checkout ${{ inputs.tag }}
+
+      - name: Build release artifacts
+        env:
+          VERSION: ${{ steps.tag.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+          DATE: ${{ github.run_id }}
+        run: |
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" VERSION="${VERSION}" COMMIT="${COMMIT}" scripts/build-release.sh
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            dist/repodock-macos.zip
+            dist/repodock-linux-amd64.tar.gz
+            dist/repodock-linux-arm64.tar.gz
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew tap
+        if: ${{ secrets.TAP_TOKEN != '' }}
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${TAP_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/roversx/homebrew-tap/actions/workflows/update-formula.yml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"formula\":\"repodock\",\"tag\":\"${TAG}\",\"repository\":\"roversx/repodock\"}}"

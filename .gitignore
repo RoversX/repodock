@@ -1,0 +1,8 @@
+.claude/
+bin/
+dist/
+.DS_Store
+task_plan.md
+progress.md
+findings.md
+todo.md
