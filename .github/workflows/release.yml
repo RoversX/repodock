@@ -17,6 +17,8 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,9 +65,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update Homebrew tap
-        if: ${{ secrets.TAP_TOKEN != '' }}
+        if: ${{ env.TAP_TOKEN != '' }}
         env:
-          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           curl -X POST \
