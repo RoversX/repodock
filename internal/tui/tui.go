@@ -169,6 +169,8 @@ var allCommands = []commandEntry{
 	{"sync", "sync projects from providers"},
 	{"shell", "open shell in selected project"},
 	{"reveal", "open selected project in Finder: /reveal [reveal|open]"},
+	{"new", "open the manual project import panel"},
+	{"rename", "rename selected project: /rename New Name"},
 	{"pin", "pin selected project to top"},
 	{"unpin", "remove selected project from top pins"},
 	{"hide", "hide selected project from repodock"},
@@ -213,6 +215,7 @@ type model struct {
 	hoverViewMode         string
 	projects              []domain.Project
 	projectsBase          []domain.Project
+	manualProjects        map[string]store.ManualProject
 	pinnedPaths           map[string]struct{}
 	hiddenPaths           map[string]struct{}
 	input                 textinput.Model
@@ -237,6 +240,10 @@ type model struct {
 	settingsCursor        int
 	hiddenOpen            bool
 	hiddenCursor          int
+	newProjectOpen        bool
+	newProjectCursor      int
+	newProjectPathInput   textinput.Model
+	newProjectNameInput   textinput.Model
 	onboardingOpen        bool
 	onboardingIsProviders bool // true when opened via /providers (not first-run)
 	onboardingCursor      int
@@ -268,6 +275,7 @@ type model struct {
 
 type projectsLoadedMsg struct {
 	projects       []domain.Project
+	manualProjects map[string]store.ManualProject
 	pinnedPaths    map[string]struct{}
 	hiddenPaths    map[string]struct{}
 	providers      []sources.Detection
@@ -392,9 +400,20 @@ func initialModel() model {
 	layoutNameInput.Prompt = ""
 	layoutNameInput.CharLimit = 64
 
+	newProjectPathInput := textinput.New()
+	newProjectPathInput.Placeholder = "drag folder here or paste absolute path"
+	newProjectPathInput.Prompt = ""
+	newProjectPathInput.CharLimit = 512
+
+	newProjectNameInput := textinput.New()
+	newProjectNameInput.Placeholder = "display name (optional)"
+	newProjectNameInput.Prompt = ""
+	newProjectNameInput.CharLimit = 128
+
 	return model{
 		projects:            nil,
 		projectsBase:        nil,
+		manualProjects:      make(map[string]store.ManualProject),
 		pinnedPaths:         make(map[string]struct{}),
 		hiddenPaths:         make(map[string]struct{}),
 		input:               input,
@@ -413,6 +432,8 @@ func initialModel() model {
 		resolvedTheme:       resolvedTheme,
 		layoutInput:         layoutInput,
 		layoutNameInput:     layoutNameInput,
+		newProjectPathInput: newProjectPathInput,
+		newProjectNameInput: newProjectNameInput,
 	}
 }
 
@@ -438,6 +459,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			projects, providers, lastOpened = demoDataset()
 		}
 		m.projectsBase = projects
+		m.manualProjects = msg.manualProjects
+		if m.manualProjects == nil {
+			m.manualProjects = make(map[string]store.ManualProject)
+		}
 		m.pinnedPaths = msg.pinnedPaths
 		m.hiddenPaths = msg.hiddenPaths
 		m.providers = providers
@@ -602,6 +627,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.onboardingOpen {
 				return m, m.closeOnboarding()
 			}
+			if m.newProjectOpen {
+				m.closeNewProjectImport()
+				return m, nil
+			}
 			if m.themePickerOpen {
 				return m, m.closeThemePicker(false)
 			}
@@ -629,6 +658,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			if m.onboardingOpen {
 				return m, m.closeOnboarding()
+			}
+			if m.newProjectOpen {
+				m.closeNewProjectImport()
+				return m, nil
 			}
 			if m.themePickerOpen {
 				return m, m.closeThemePicker(false)
@@ -692,6 +725,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.loadingProjects {
 				return m, nil
 			}
+			if m.newProjectOpen {
+				m.newProjectCursor = (m.newProjectCursor + 1) % 2
+				m.syncNewProjectFocus()
+				return m, nil
+			}
 			if !m.isCommandMode() {
 				m.actionOpen = !m.actionOpen
 				m.actionCursor = 0
@@ -703,6 +741,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "up":
+			if m.newProjectOpen {
+				m.newProjectCursor--
+				if m.newProjectCursor < 0 {
+					m.newProjectCursor = 1
+				}
+				m.syncNewProjectFocus()
+				return m, nil
+			}
 			if m.onboardingOpen {
 				m.moveOnboarding(-1)
 				return m, nil
@@ -780,6 +826,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "down":
+			if m.newProjectOpen {
+				m.newProjectCursor = (m.newProjectCursor + 1) % 2
+				m.syncNewProjectFocus()
+				return m, nil
+			}
 			if m.onboardingOpen {
 				m.moveOnboarding(1)
 				return m, nil
@@ -914,6 +965,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.adjustOnboarding(0)
 				return m, nil
 			}
+			if m.newProjectOpen {
+				return m, m.finishNewProjectImport()
+			}
 			if m.themePickerOpen {
 				return m, m.closeThemePicker(true)
 			}
@@ -982,6 +1036,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if keyMsg, isKey := msg.(tea.KeyMsg); isKey {
+		if m.newProjectOpen {
+			var cmd tea.Cmd
+			if m.newProjectCursor == 0 {
+				m.newProjectPathInput, cmd = m.newProjectPathInput.Update(msg)
+				m.newProjectPathInput.SetValue(stripLeakedTerminalFragments(m.newProjectPathInput.Value()))
+			} else {
+				m.newProjectNameInput, cmd = m.newProjectNameInput.Update(msg)
+				m.newProjectNameInput.SetValue(stripLeakedTerminalFragments(m.newProjectNameInput.Value()))
+			}
+			return m, cmd
+		}
+
 		// Layout editor single-key actions (when panel open, not editing a field)
 		if m.layoutOpen && !m.layoutEditing {
 			if m.layoutNaming {
@@ -1067,7 +1133,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.onboardingOpen || m.themePickerOpen || m.settingsOpen || m.hiddenOpen || m.actionOpen {
+	if m.onboardingOpen || m.newProjectOpen || m.themePickerOpen || m.settingsOpen || m.hiddenOpen || m.actionOpen {
 		return m, nil
 	}
 
@@ -1139,6 +1205,8 @@ func (m model) View() string {
 			hintText = "loading providers  ·  building project list"
 		} else if m.onboardingOpen {
 			hintText = "enter close  ·  esc close  ·  /onboard reopen later"
+		} else if m.newProjectOpen {
+			hintText = "paste path or drag folder into path box  ·  tab/↑↓ switch field  ·  enter import  ·  esc close"
 		} else if m.themePickerOpen {
 			hintText = "↑↓ preview  ·  enter apply  ·  esc cancel  ·  q close"
 		} else if m.settingsOpen {
@@ -1245,13 +1313,21 @@ func (m *model) runCommand(raw string) tea.Cmd {
 			return revealInFinderCmd(project.Path, mode)
 		}
 	}
+	if strings.HasPrefix(command, "new ") {
+		path := strings.TrimSpace(strings.TrimPrefix(command, "new "))
+		return m.addManualProject(path)
+	}
+	if strings.HasPrefix(command, "rename ") {
+		name := strings.TrimSpace(strings.TrimPrefix(command, "rename "))
+		return m.renameSelectedProject(name)
+	}
 
 	switch command {
 	case "":
 		m.status = "Command bar cleared."
 		return nil
 	case "help":
-		m.status = "Commands: /help /demo [/demo on|off] /onboard /providers /view mixed|provider /layout /theme [/theme family] /mode auto|dark|light /palette tableau10 /sync /shell /reveal [/reveal reveal|open] /pin /unpin /hide /hidden /unhide-all /copy /clear"
+		m.status = "Commands: /help /demo [/demo on|off] /onboard /providers /view mixed|provider /layout /theme [/theme family] /mode auto|dark|light /palette tableau10 /sync /shell /reveal [/reveal reveal|open] /new [/new /absolute/path] /rename New Name /pin /unpin /hide /hidden /unhide-all /copy /clear"
 		return nil
 	case "demo":
 		return m.setDemoMode(!m.demoMode())
@@ -1299,6 +1375,9 @@ func (m *model) runCommand(raw string) tea.Cmd {
 		return nil
 	case "hidden":
 		m.openHiddenProjects()
+		return nil
+	case "new":
+		m.openNewProjectImport()
 		return nil
 	case "sync":
 		m.status = "Reloading project providers..."
@@ -1981,6 +2060,9 @@ func renderContent(m model, width int) string {
 	}
 	if m.themePickerOpen {
 		return overlayTop(base, clampLines(renderThemePickerPanel(m, width), m.overlayLineBudget()))
+	}
+	if m.newProjectOpen {
+		return overlayTop(base, clampLines(renderNewProjectPanel(m, width, m.overlayLineBudget()), m.overlayLineBudget()))
 	}
 	if m.settingsOpen {
 		return overlayTop(base, renderSettingsPanel(m, width, m.overlayLineBudget()))
@@ -2936,7 +3018,7 @@ func renderOnboardingScreen(m model) string {
 }
 
 func renderActionPanel(m model, width int) string {
-	if m.themePickerOpen || m.settingsOpen || m.hiddenOpen || m.layoutOpen || !m.actionOpen || m.isCommandMode() {
+	if m.themePickerOpen || m.newProjectOpen || m.settingsOpen || m.hiddenOpen || m.layoutOpen || !m.actionOpen || m.isCommandMode() {
 		return ""
 	}
 
@@ -3053,6 +3135,40 @@ func renderHiddenPanel(m model, width int, maxLines int) string {
 	return clampLines(panel.Render(strings.Join(lines, "\n")), maxLines)
 }
 
+func renderNewProjectPanel(m model, width, maxLines int) string {
+	panelWidth := width
+	if width >= 28 {
+		panelWidth = width - 4
+	}
+	panelStyle := currentStyles.panel.BorderForeground(lipgloss.Color(activeTheme.Palette.BorderActive))
+	panel, panelContentWidth := fitPanel(panelStyle, panelWidth)
+
+	lines := []string{
+		renderSingleLine("  ", "Import Project", panelContentWidth, currentStyles.panelTitle),
+		renderSingleLine("  ", "Drag a folder into the path field, or paste an absolute path.", panelContentWidth, currentStyles.panelSubtitle),
+		"",
+	}
+
+	pathLabel := currentStyles.listNormal.Render("Path")
+	nameLabel := currentStyles.listNormal.Render("Name")
+	if m.newProjectCursor == 0 {
+		pathLabel = currentStyles.listSelected.Copy().Bold(true).Render("Path")
+	}
+	if m.newProjectCursor == 1 {
+		nameLabel = currentStyles.listSelected.Copy().Bold(true).Render("Name")
+	}
+
+	lines = append(lines, "  "+pathLabel)
+	lines = append(lines, "  "+m.newProjectPathInput.View())
+	lines = append(lines, "")
+	lines = append(lines, "  "+nameLabel)
+	lines = append(lines, "  "+m.newProjectNameInput.View())
+	lines = append(lines, "")
+	lines = append(lines, renderSingleLine("  ", "Press Enter to import. The name is optional and only changes the RepoDock label.", panelContentWidth, currentStyles.subtle))
+
+	return clampLines(panel.Render(strings.Join(lines, "\n")), maxLines)
+}
+
 func (m *model) openOnboarding() {
 	m.onboardingOpen = true
 	m.onboardingIsProviders = false
@@ -3071,6 +3187,68 @@ func (m *model) openProviders() {
 	m.onboardingCursor = 0
 	m.syncOnboardingState()
 	m.status = "Providers open."
+}
+
+func (m *model) openNewProjectImport() {
+	m.newProjectOpen = true
+	m.newProjectCursor = 0
+	m.input.SetValue("")
+	m.cmdCursor = 0
+	m.newProjectPathInput.SetValue("")
+	m.newProjectNameInput.SetValue("")
+	m.syncNewProjectFocus()
+	m.status = "Import a manual project."
+}
+
+func (m *model) closeNewProjectImport() {
+	m.newProjectOpen = false
+	m.newProjectCursor = 0
+	m.newProjectPathInput.Blur()
+	m.newProjectNameInput.Blur()
+	m.newProjectPathInput.SetValue("")
+	m.newProjectNameInput.SetValue("")
+	m.status = "Import project closed."
+}
+
+func (m *model) syncNewProjectFocus() {
+	if m.newProjectCursor <= 0 {
+		m.newProjectCursor = 0
+		m.newProjectNameInput.Blur()
+		m.newProjectPathInput.Focus()
+		return
+	}
+	m.newProjectCursor = 1
+	m.newProjectPathInput.Blur()
+	m.newProjectNameInput.Focus()
+}
+
+func normalizeImportedPath(raw string) string {
+	path := strings.TrimSpace(raw)
+	path = strings.Trim(path, "\"'")
+	replacer := strings.NewReplacer(
+		`\\ `, `\ `,
+		`\ `, ` `,
+		`\"`, `"`,
+		`\'`, `'`,
+	)
+	path = replacer.Replace(path)
+	return filepath.Clean(path)
+}
+
+func (m *model) finishNewProjectImport() tea.Cmd {
+	path := normalizeImportedPath(m.newProjectPathInput.Value())
+	name := strings.TrimSpace(m.newProjectNameInput.Value())
+	cmd := m.addManualProjectWithName(path, name)
+	if cmd == nil {
+		return nil
+	}
+	m.newProjectOpen = false
+	m.newProjectCursor = 0
+	m.newProjectPathInput.Blur()
+	m.newProjectNameInput.Blur()
+	m.newProjectPathInput.SetValue("")
+	m.newProjectNameInput.SetValue("")
+	return cmd
 }
 
 func (m *model) closeOnboarding() tea.Cmd {
@@ -3429,6 +3607,7 @@ func loadProjectsCmd(stateStore store.AppStateStore) tea.Cmd {
 		for _, path := range state.HiddenPaths {
 			hiddenPaths[filepath.Clean(path)] = struct{}{}
 		}
+		manualProjects := manualProjectsMap(state.ManualProjects)
 
 		lastOpened := activity.LastOpened()
 
@@ -3438,8 +3617,12 @@ func loadProjectsCmd(stateStore store.AppStateStore) tea.Cmd {
 		}
 		providers := sources.AvailableProviders(detections)
 		if len(providers) == 0 {
+			projects := mergeManualProjects(nil, state.ManualProjects)
+			detections = appendManualDetection(detections, state.ManualProjects)
+			projects = filterHiddenProjects(projects, hiddenPaths)
 			return projectsLoadedMsg{
-				projects:       nil,
+				projects:       projects,
+				manualProjects: manualProjects,
 				pinnedPaths:    pinnedPaths,
 				hiddenPaths:    hiddenPaths,
 				providers:      detections,
@@ -3451,9 +3634,12 @@ func loadProjectsCmd(stateStore store.AppStateStore) tea.Cmd {
 		}
 
 		projects, providerErrs := sources.LoadAll(context.Background(), providers...)
+		projects = mergeManualProjects(projects, state.ManualProjects)
+		detections = appendManualDetection(detections, state.ManualProjects)
 		projects = filterHiddenProjects(projects, hiddenPaths)
 		return projectsLoadedMsg{
 			projects:       projects,
+			manualProjects: manualProjects,
 			pinnedPaths:    pinnedPaths,
 			hiddenPaths:    hiddenPaths,
 			providers:      detections,
@@ -3464,6 +3650,89 @@ func loadProjectsCmd(stateStore store.AppStateStore) tea.Cmd {
 			showLastOpened: state.ShowLastOpened,
 		}
 	}
+}
+
+func manualProjectsMap(projects []store.ManualProject) map[string]store.ManualProject {
+	out := make(map[string]store.ManualProject, len(projects))
+	for _, project := range projects {
+		cleanPath := filepath.Clean(strings.TrimSpace(project.Path))
+		if cleanPath == "" || cleanPath == "." {
+			continue
+		}
+		out[cleanPath] = store.ManualProject{Path: cleanPath, Name: strings.TrimSpace(project.Name)}
+	}
+	return out
+}
+
+func mergeManualProjects(projects []domain.Project, manual []store.ManualProject) []domain.Project {
+	if len(manual) == 0 {
+		return projects
+	}
+
+	merged := append([]domain.Project(nil), projects...)
+	indexByPath := make(map[string]int, len(merged))
+	for i, project := range merged {
+		indexByPath[filepath.Clean(project.Path)] = i
+	}
+
+	for _, entry := range manual {
+		path := filepath.Clean(strings.TrimSpace(entry.Path))
+		if path == "" || path == "." {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			name = filepath.Base(path)
+			if name == "." || name == string(filepath.Separator) || name == "" {
+				name = path
+			}
+		}
+
+		if idx, ok := indexByPath[path]; ok {
+			merged[idx].Sources = appendSourceIfMissing(merged[idx].Sources, domain.SourceManual)
+			if strings.TrimSpace(entry.Name) != "" {
+				merged[idx].Name = strings.TrimSpace(entry.Name)
+			}
+			continue
+		}
+
+		indexByPath[path] = len(merged)
+		merged = append(merged, domain.Project{
+			Name:    name,
+			Path:    path,
+			Sources: []domain.Source{domain.SourceManual},
+		})
+	}
+
+	return merged
+}
+
+func appendSourceIfMissing(current []domain.Source, src domain.Source) []domain.Source {
+	for _, existing := range current {
+		if existing == src {
+			return current
+		}
+	}
+	return append(current, src)
+}
+
+func appendManualDetection(detections []sources.Detection, manual []store.ManualProject) []sources.Detection {
+	if len(manual) == 0 {
+		return detections
+	}
+	for _, detection := range detections {
+		if detection.Name == "manual" {
+			return detections
+		}
+	}
+	return append(detections, sources.Detection{
+		ID:        "manual",
+		Kind:      "manual",
+		Name:      "manual",
+		Enabled:   true,
+		Available: true,
+		Status:    sources.StatusAvailable,
+	})
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -3656,6 +3925,10 @@ func (m model) buildAppState() store.AppState {
 	for path := range m.hiddenPaths {
 		hidden = append(hidden, path)
 	}
+	manual := make([]store.ManualProject, 0, len(m.manualProjects))
+	for _, project := range m.manualProjects {
+		manual = append(manual, project)
+	}
 	lo := m.lastOpened
 	if lo == nil {
 		lo = make(map[string]time.Time)
@@ -3663,6 +3936,7 @@ func (m model) buildAppState() store.AppState {
 	return store.AppState{
 		PinnedPaths:    paths,
 		HiddenPaths:    hidden,
+		ManualProjects: manual,
 		SortMode:       m.sortMode,
 		DisplayMode:    m.displayMode,
 		LastOpened:     lo,
@@ -3831,6 +4105,76 @@ func (m *model) setHiddenForSelected(hidden bool) tea.Cmd {
 	return saveStateCmd(m.stateStore, m.buildAppState(), m.status)
 }
 
+func (m *model) addManualProject(path string) tea.Cmd {
+	return m.addManualProjectWithName(path, "")
+}
+
+func (m *model) addManualProjectWithName(path, name string) tea.Cmd {
+	path = normalizeImportedPath(path)
+	if path == "" || path == "." {
+		m.status = "Usage: /new /absolute/path"
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		m.status = "Manual project path must be absolute."
+		return nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		m.status = fmt.Sprintf("Project path not found: %s", path)
+		return nil
+	}
+	if !info.IsDir() {
+		m.status = "Manual project path must be a directory."
+		return nil
+	}
+
+	if m.manualProjects == nil {
+		m.manualProjects = make(map[string]store.ManualProject)
+	}
+	if _, exists := m.manualProjects[path]; exists {
+		m.status = fmt.Sprintf("%s is already imported.", filepath.Base(path))
+		return nil
+	}
+
+	m.manualProjects[path] = store.ManualProject{Path: path, Name: strings.TrimSpace(name)}
+	m.status = fmt.Sprintf("Imported %s. Reloading projects...", filepath.Base(path))
+	return tea.Batch(
+		saveStateCmd(m.stateStore, m.buildAppState(), ""),
+		loadProjectsCmd(m.stateStore),
+	)
+}
+
+func (m *model) renameSelectedProject(name string) tea.Cmd {
+	project, ok := m.selectedProject()
+	if !ok {
+		m.status = "No project selected."
+		return nil
+	}
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		m.status = "Usage: /rename New Name"
+		return nil
+	}
+
+	cleanPath := filepath.Clean(project.Path)
+	if m.manualProjects == nil {
+		m.manualProjects = make(map[string]store.ManualProject)
+	}
+	entry := m.manualProjects[cleanPath]
+	entry.Path = cleanPath
+	entry.Name = name
+	m.manualProjects[cleanPath] = entry
+
+	m.status = fmt.Sprintf("Renamed %s to %s. Reloading projects...", project.Name, name)
+	return tea.Batch(
+		saveStateCmd(m.stateStore, m.buildAppState(), ""),
+		loadProjectsCmd(m.stateStore),
+	)
+}
+
 func (m *model) clearHiddenProjects() tea.Cmd {
 	if len(m.hiddenPaths) == 0 {
 		m.status = "No hidden projects."
@@ -3913,6 +4257,7 @@ func (m model) projectActions() []actionEntry {
 
 	actions := []actionEntry{
 		{id: "shell", label: "Open Shell", desc: "Open an interactive shell in this project."},
+		{id: "new", label: "Import Project", desc: "Add a manual project by drag, paste, or path input."},
 	}
 	if store.NewLayoutStore(project.Path).HasLayout() {
 		actions = append(actions, actionEntry{id: "default-layout", label: "Load Default Layout", desc: "Open the project's default saved layout."})

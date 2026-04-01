@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -15,10 +16,16 @@ const stateFileName = "state.json"
 type AppState struct {
 	PinnedPaths    []string             `json:"pinned_paths"`
 	HiddenPaths    []string             `json:"hidden_paths,omitempty"`
+	ManualProjects []ManualProject      `json:"manual_projects,omitempty"`
 	SortMode       string               `json:"sort_mode"`
 	DisplayMode    string               `json:"display_mode"`
 	LastOpened     map[string]time.Time `json:"last_opened"`
 	ShowLastOpened bool                 `json:"show_last_opened"`
+}
+
+type ManualProject struct {
+	Path string `json:"path"`
+	Name string `json:"name,omitempty"`
 }
 
 type AppStateStore struct {
@@ -64,6 +71,7 @@ func (s AppStateStore) Load() (AppState, error) {
 	state.PinnedPaths = slices.Compact(state.PinnedPaths)
 	slices.Sort(state.HiddenPaths)
 	state.HiddenPaths = slices.Compact(state.HiddenPaths)
+	state.ManualProjects = normalizeManualProjects(state.ManualProjects)
 	return state, nil
 }
 
@@ -76,6 +84,7 @@ func (s AppStateStore) Save(state AppState) error {
 	state.PinnedPaths = slices.Compact(state.PinnedPaths)
 	slices.Sort(state.HiddenPaths)
 	state.HiddenPaths = slices.Compact(state.HiddenPaths)
+	state.ManualProjects = normalizeManualProjects(state.ManualProjects)
 
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -96,4 +105,32 @@ func (s AppStateStore) Save(state AppState) error {
 	}
 
 	return nil
+}
+
+func normalizeManualProjects(projects []ManualProject) []ManualProject {
+	if len(projects) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(projects))
+	out := make([]ManualProject, 0, len(projects))
+	for _, project := range projects {
+		path := filepath.Clean(strings.TrimSpace(project.Path))
+		if path == "" || path == "." {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, ManualProject{
+			Path: path,
+			Name: strings.TrimSpace(project.Name),
+		})
+	}
+
+	slices.SortFunc(out, func(a, b ManualProject) int {
+		return strings.Compare(strings.ToLower(a.Path), strings.ToLower(b.Path))
+	})
+	return out
 }
