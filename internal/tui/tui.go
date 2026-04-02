@@ -295,6 +295,7 @@ type projectsLoadFailedMsg struct {
 
 type stateSavedMsg struct {
 	action string
+	reload bool
 }
 
 type stateSaveFailedMsg struct {
@@ -512,6 +513,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stateSavedMsg:
 		if msg.action != "" {
 			m.status = msg.action
+		}
+		if msg.reload {
+			m.loadingProjects = true
+			m.loadingProjectsFrame = 0
+			return m, tea.Batch(loadProjectsCmd(m.stateStore), projectLaunchTickCmd())
 		}
 		return m, nil
 	case stateSaveFailedMsg:
@@ -1439,6 +1445,8 @@ func (m *model) runCommand(raw string) tea.Cmd {
 		mode := m.finderRevealMode()
 		m.status = fmt.Sprintf("Opening %s in Finder (%s)...", project.Name, mode)
 		return revealInFinderCmd(project.Path, mode)
+	case "delete-manual":
+		return m.deleteSelectedManualProject()
 	case "pin":
 		return m.setPinnedForSelected(true)
 	case "unpin":
@@ -3933,6 +3941,15 @@ func saveStateCmd(stateStore store.AppStateStore, state store.AppState, action s
 	}
 }
 
+func saveStateAndReloadCmd(stateStore store.AppStateStore, state store.AppState, action string) tea.Cmd {
+	return func() tea.Msg {
+		if err := stateStore.Save(state); err != nil {
+			return stateSaveFailedMsg{err: err}
+		}
+		return stateSavedMsg{action: action, reload: true}
+	}
+}
+
 func saveSettingsCmd(settingsStore store.SettingsStore, settings store.Settings, action string) tea.Cmd {
 	return func() tea.Msg {
 		if err := settingsStore.Save(settings); err != nil {
@@ -4166,10 +4183,7 @@ func (m *model) addManualProjectWithName(path, name string) tea.Cmd {
 
 	m.manualProjects[path] = store.ManualProject{Path: path, Name: strings.TrimSpace(name)}
 	m.status = fmt.Sprintf("Imported %s. Reloading projects...", filepath.Base(path))
-	return tea.Batch(
-		saveStateCmd(m.stateStore, m.buildAppState(), ""),
-		loadProjectsCmd(m.stateStore),
-	)
+	return saveStateAndReloadCmd(m.stateStore, m.buildAppState(), m.status)
 }
 
 func (m *model) renameSelectedProject(name string) tea.Cmd {
@@ -4195,10 +4209,36 @@ func (m *model) renameSelectedProject(name string) tea.Cmd {
 	m.manualProjects[cleanPath] = entry
 
 	m.status = fmt.Sprintf("Renamed %s to %s. Reloading projects...", project.Name, name)
-	return tea.Batch(
-		saveStateCmd(m.stateStore, m.buildAppState(), ""),
-		loadProjectsCmd(m.stateStore),
-	)
+	return saveStateAndReloadCmd(m.stateStore, m.buildAppState(), m.status)
+}
+
+func (m *model) deleteSelectedManualProject() tea.Cmd {
+	project, ok := m.selectedProject()
+	if !ok {
+		m.status = "No project selected."
+		return nil
+	}
+
+	cleanPath := filepath.Clean(project.Path)
+	if m.manualProjects == nil {
+		m.status = "No manual projects to delete."
+		return nil
+	}
+	if _, exists := m.manualProjects[cleanPath]; !exists {
+		m.status = fmt.Sprintf("%s is not a manual project.", project.Name)
+		return nil
+	}
+
+	delete(m.manualProjects, cleanPath)
+	m.actionOpen = false
+
+	if len(project.Sources) == 1 && project.Sources[0] == domain.SourceManual {
+		m.status = fmt.Sprintf("Deleted %s from RepoDock. Reloading projects...", project.Name)
+	} else {
+		m.status = fmt.Sprintf("Deleted manual import for %s. Reloading projects...", project.Name)
+	}
+
+	return saveStateAndReloadCmd(m.stateStore, m.buildAppState(), m.status)
 }
 
 func (m *model) clearHiddenProjects() tea.Cmd {
@@ -4209,10 +4249,7 @@ func (m *model) clearHiddenProjects() tea.Cmd {
 
 	m.hiddenPaths = make(map[string]struct{})
 	m.status = "Hidden projects cleared. Reloading providers..."
-	return tea.Batch(
-		saveStateCmd(m.stateStore, m.buildAppState(), ""),
-		loadProjectsCmd(m.stateStore),
-	)
+	return saveStateAndReloadCmd(m.stateStore, m.buildAppState(), m.status)
 }
 
 func (m *model) openHiddenProjects() {
@@ -4260,10 +4297,7 @@ func (m *model) restoreSelectedHiddenProject() tea.Cmd {
 		name = path
 	}
 	m.status = fmt.Sprintf("Restored %s. Reloading providers...", name)
-	return tea.Batch(
-		saveStateCmd(m.stateStore, m.buildAppState(), ""),
-		loadProjectsCmd(m.stateStore),
-	)
+	return saveStateAndReloadCmd(m.stateStore, m.buildAppState(), m.status)
 }
 
 func (m model) projectActions() []actionEntry {
@@ -4296,6 +4330,15 @@ func (m model) projectActions() []actionEntry {
 			desc = "Open this project folder in Finder."
 		}
 		actions = append(actions, actionEntry{id: "finder", label: label, desc: desc})
+	}
+	if projectHasSource(project, string(domain.SourceManual)) {
+		label := "Delete Manual Import"
+		desc := "Remove the manual import for this project."
+		if len(project.Sources) == 1 && project.Sources[0] == domain.SourceManual {
+			label = "Delete Project"
+			desc = "Remove this manual project from RepoDock."
+		}
+		actions = append(actions, actionEntry{id: "delete-manual", label: label, desc: desc})
 	}
 	actions = append(actions,
 		actionEntry{id: "layout", label: "Edit Layout", desc: "Create or edit launch layouts for this project."},
