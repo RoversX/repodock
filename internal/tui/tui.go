@@ -155,6 +155,7 @@ type commandEntry struct {
 
 var allCommands = []commandEntry{
 	{"help", "show available commands"},
+	{"version", "show current version"},
 	{"demo", "toggle privacy-safe demo projects"},
 	{"onboard", "show the onboarding guide"},
 	{"providers", "show detected project providers"},
@@ -170,6 +171,7 @@ var allCommands = []commandEntry{
 	{"shell", "open shell in selected project"},
 	{"reveal", "open selected project in Finder: /reveal [reveal|open]"},
 	{"new", "open the manual project import panel"},
+	{"add", "alias for /new"},
 	{"rename", "rename selected project: /rename New Name"},
 	{"pin", "pin selected project to top"},
 	{"unpin", "remove selected project from top pins"},
@@ -1317,6 +1319,10 @@ func (m *model) runCommand(raw string) tea.Cmd {
 		path := strings.TrimSpace(strings.TrimPrefix(command, "new "))
 		return m.addManualProject(path)
 	}
+	if strings.HasPrefix(command, "add ") {
+		path := strings.TrimSpace(strings.TrimPrefix(command, "add "))
+		return m.addManualProject(path)
+	}
 	if strings.HasPrefix(command, "rename ") {
 		name := strings.TrimSpace(strings.TrimPrefix(command, "rename "))
 		return m.renameSelectedProject(name)
@@ -1327,7 +1333,10 @@ func (m *model) runCommand(raw string) tea.Cmd {
 		m.status = "Command bar cleared."
 		return nil
 	case "help":
-		m.status = "Commands: /help /demo [/demo on|off] /onboard /providers /view mixed|provider /layout /theme [/theme family] /mode auto|dark|light /palette tableau10 /sync /shell /reveal [/reveal reveal|open] /new [/new /absolute/path] /rename New Name /pin /unpin /hide /hidden /unhide-all /copy /clear"
+		m.status = "Commands: /help /version /demo [/demo on|off] /onboard /providers /view mixed|provider /layout /theme [/theme family] /mode auto|dark|light /palette tableau10 /sync /shell /reveal [/reveal reveal|open] /new [/new /absolute/path] /add [/add /absolute/path] /rename New Name /pin /unpin /hide /hidden /unhide-all /copy /clear"
+		return nil
+	case "version":
+		m.status = buildinfo.Long()
 		return nil
 	case "demo":
 		return m.setDemoMode(!m.demoMode())
@@ -1377,6 +1386,9 @@ func (m *model) runCommand(raw string) tea.Cmd {
 		m.openHiddenProjects()
 		return nil
 	case "new":
+		m.openNewProjectImport()
+		return nil
+	case "add":
 		m.openNewProjectImport()
 		return nil
 	case "sync":
@@ -3225,13 +3237,27 @@ func (m *model) syncNewProjectFocus() {
 func normalizeImportedPath(raw string) string {
 	path := strings.TrimSpace(raw)
 	path = strings.Trim(path, "\"'")
-	replacer := strings.NewReplacer(
-		`\\ `, `\ `,
-		`\ `, ` `,
-		`\"`, `"`,
-		`\'`, `'`,
-	)
-	path = replacer.Replace(path)
+
+	var b strings.Builder
+	b.Grow(len(path))
+	escaped := false
+	for _, r := range path {
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if escaped {
+		b.WriteRune('\\')
+	}
+
+	path = b.String()
 	return filepath.Clean(path)
 }
 
